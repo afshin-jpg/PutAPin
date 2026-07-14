@@ -47,7 +47,7 @@ def add_item(name: str, item: str):
     ws.append_row([item])
 
 
-def remove_item(name: str, index: int) -> str | None:
+def remove_item(name: str, index: int):
     sh = _spreadsheet()
     try:
         ws = sh.worksheet(name)
@@ -61,7 +61,7 @@ def remove_item(name: str, index: int) -> str | None:
         return None
 
 
-def get_active_list(chat_id: int) -> str | None:
+def get_active_list(chat_id: int):
     sh = _spreadsheet()
     try:
         ws = sh.worksheet(STATE_SHEET)

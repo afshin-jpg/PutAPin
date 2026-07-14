@@ -20,7 +20,7 @@ HELP = (
 )
 
 
-async def _active(update: Update) -> str | None:
+async def _active(update: Update):
     name = sheets.get_active_list(update.effective_chat.id)
     if not name:
         await update.message.reply_text("No active list. Use /switch <name> or /newlist <name>.")
