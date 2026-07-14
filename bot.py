@@ -1,5 +1,7 @@
 import os
+import asyncio
 import logging
+from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import sheets
@@ -8,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-PORT = int(os.environ.get("PORT", 8443))
+PORT = int(os.environ.get("PORT", 8080))
 
 HELP = (
     "/newlist <name> — create a list and switch to it\n"
@@ -97,7 +99,7 @@ async def add_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Added to {name} ✓")
 
 
-def main():
+def build_app():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("newlist", newlist))
@@ -106,16 +108,42 @@ def main():
     app.add_handler(CommandHandler("list", list_items))
     app.add_handler(CommandHandler("done", done))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_item))
+    return app
 
+
+async def run_webhook(ptb_app):
+    async def health(_):
+        return web.Response(text="OK")
+
+    async def webhook(request):
+        data = await request.json()
+        update = Update.de_json(data, ptb_app.bot)
+        await ptb_app.process_update(update)
+        return web.Response(text="OK")
+
+    web_app = web.Application()
+    web_app.router.add_get("/", health)
+    web_app.router.add_post("/webhook", webhook)
+
+    async with ptb_app:
+        await ptb_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        await ptb_app.start()
+
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        logging.info(f"Listening on port {PORT}")
+
+        await asyncio.Event().wait()
+
+
+def main():
+    ptb_app = build_app()
     if WEBHOOK_URL:
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=f"{WEBHOOK_URL}/webhook",
-            url_path="/webhook",
-        )
+        asyncio.run(run_webhook(ptb_app))
     else:
-        app.run_polling()
+        ptb_app.run_polling()
 
 
 if __name__ == "__main__":
