@@ -1,16 +1,17 @@
 import os
-import asyncio
+import json
 import logging
-from aiohttp import web
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import threading
+import requests as http_requests
+from flask import Flask, request, jsonify
 import sheets
 
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-PORT = int(os.environ.get("PORT", 8080))
+
+app = Flask(__name__)
 
 HELP = (
     "/newlist <name> — create a list and switch to it\n"
@@ -22,132 +23,124 @@ HELP = (
 )
 
 
-async def _active(update: Update):
-    name = sheets.get_active_list(update.effective_chat.id)
-    if not name:
-        await update.message.reply_text("No active list. Use /switch <name> or /newlist <name>.")
-    return name
+def tg_send(chat_id, text):
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+    except Exception as e:
+        logging.error(f"tg_send failed: {e}")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"List bot ready!\n\n{HELP}")
-
-
-async def newlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /newlist <name>")
+def register_webhook():
+    if not WEBHOOK_URL:
         return
-    name = " ".join(context.args)
-    sheets.create_list(name)
-    sheets.set_active_list(update.effective_chat.id, name)
-    await update.message.reply_text(f"Created '{name}' and switched to it.")
+    url = f"{WEBHOOK_URL}/webhook"
+    try:
+        http_requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/deleteWebhook",
+            params={"drop_pending_updates": "true"},
+            timeout=10,
+        )
+        res = http_requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+            json={"url": url},
+            timeout=10,
+        )
+        logging.info(f"Webhook set to {url}: {res.json()}")
+    except Exception as e:
+        logging.error(f"Webhook registration failed: {e}")
 
 
-async def switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /switch <name>")
-        return
-    name = " ".join(context.args)
-    if name not in sheets.get_lists():
-        await update.message.reply_text(f"List '{name}' not found. Use /lists to see available lists.")
-        return
-    sheets.set_active_list(update.effective_chat.id, name)
-    await update.message.reply_text(f"Switched to '{name}'.")
+@app.route("/")
+def health():
+    return jsonify({"status": "ok"})
 
 
-async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    all_lists = sheets.get_lists()
-    if not all_lists:
-        await update.message.reply_text("No lists yet. Use /newlist <name> to create one.")
-        return
-    current = sheets.get_active_list(update.effective_chat.id)
-    lines = [f"{'▶ ' if l == current else '  '}{l}" for l in all_lists]
-    await update.message.reply_text("\n".join(lines))
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = request.json or {}
+    msg = update.get("message", {})
+    chat_id = msg.get("chat", {}).get("id")
+    text = (msg.get("text") or "").strip()
 
+    if not chat_id or not text:
+        return jsonify({"ok": True})
 
-async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = await _active(update)
-    if not name:
-        return
-    items = sheets.get_items(name)
-    if not items:
-        await update.message.reply_text(f"'{name}' is empty.")
-        return
-    lines = "\n".join(f"{i+1}. {item}" for i, item in enumerate(items))
-    await update.message.reply_text(f"*{name}*\n{lines}", parse_mode="Markdown")
+    if text.startswith("/"):
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower().split("@")[0]
+        arg = parts[1] if len(parts) > 1 else ""
 
+        if cmd == "/start" or cmd == "/help":
+            tg_send(chat_id, f"List bot ready!\n\n{HELP}")
 
-async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = await _active(update)
-    if not name:
-        return
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /done <number>")
-        return
-    removed = sheets.remove_item(name, int(context.args[0]) - 1)
-    if removed is None:
-        await update.message.reply_text("Item not found.")
+        elif cmd == "/newlist":
+            if not arg:
+                tg_send(chat_id, "Usage: /newlist <name>")
+            else:
+                sheets.create_list(arg)
+                sheets.set_active_list(chat_id, arg)
+                tg_send(chat_id, f"Created '{arg}' and switched to it.")
+
+        elif cmd == "/switch":
+            if not arg:
+                tg_send(chat_id, "Usage: /switch <name>")
+            elif arg not in sheets.get_lists():
+                tg_send(chat_id, f"List '{arg}' not found. Use /lists to see all.")
+            else:
+                sheets.set_active_list(chat_id, arg)
+                tg_send(chat_id, f"Switched to '{arg}'.")
+
+        elif cmd == "/lists":
+            all_lists = sheets.get_lists()
+            if not all_lists:
+                tg_send(chat_id, "No lists yet. Use /newlist <name> to create one.")
+            else:
+                current = sheets.get_active_list(chat_id)
+                lines = [f"{'▶ ' if l == current else '  '}{l}" for l in all_lists]
+                tg_send(chat_id, "\n".join(lines))
+
+        elif cmd == "/list":
+            name = sheets.get_active_list(chat_id)
+            if not name:
+                tg_send(chat_id, "No active list. Use /switch <name> or /newlist <name>.")
+            else:
+                items = sheets.get_items(name)
+                if not items:
+                    tg_send(chat_id, f"'{name}' is empty.")
+                else:
+                    lines = "\n".join(f"{i+1}. {item}" for i, item in enumerate(items))
+                    tg_send(chat_id, f"*{name}*\n{lines}")
+
+        elif cmd == "/done":
+            name = sheets.get_active_list(chat_id)
+            if not name:
+                tg_send(chat_id, "No active list.")
+            elif not arg.isdigit():
+                tg_send(chat_id, "Usage: /done <number>")
+            else:
+                removed = sheets.remove_item(name, int(arg) - 1)
+                if removed is None:
+                    tg_send(chat_id, "Item not found.")
+                else:
+                    tg_send(chat_id, f"Removed: {removed}")
+
     else:
-        await update.message.reply_text(f"Removed: {removed}")
+        name = sheets.get_active_list(chat_id)
+        if not name:
+            tg_send(chat_id, "No active list. Use /switch <name> or /newlist <name>.")
+        else:
+            sheets.add_item(name, text)
+            tg_send(chat_id, f"Added to {name} ✓")
 
-
-async def add_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = await _active(update)
-    if not name:
-        return
-    sheets.add_item(name, update.message.text)
-    await update.message.reply_text(f"Added to {name} ✓")
-
-
-def build_app():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("newlist", newlist))
-    app.add_handler(CommandHandler("switch", switch))
-    app.add_handler(CommandHandler("lists", lists_cmd))
-    app.add_handler(CommandHandler("list", list_items))
-    app.add_handler(CommandHandler("done", done))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_item))
-    return app
-
-
-async def run_webhook(ptb_app):
-    async def health(_):
-        return web.Response(text="OK")
-
-    async def webhook(request):
-        data = await request.json()
-        update = Update.de_json(data, ptb_app.bot)
-        await ptb_app.process_update(update)
-        return web.Response(text="OK")
-
-    web_app = web.Application()
-    web_app.router.add_get("/", health)
-    web_app.router.add_post("/webhook", webhook)
-
-    # Start HTTP server first so Render's health check passes immediately
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logging.info(f"Listening on port {PORT}")
-
-    # Initialize PTB and register webhook after server is up
-    async with ptb_app:
-        await ptb_app.initialize()
-        await ptb_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-        await ptb_app.start()
-        logging.info("Webhook registered and bot started")
-        await asyncio.Event().wait()
-
-
-def main():
-    ptb_app = build_app()
-    if WEBHOOK_URL:
-        asyncio.run(run_webhook(ptb_app))
-    else:
-        ptb_app.run_polling()
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 5001))
+    threading.Thread(target=register_webhook, daemon=True).start()
+    logging.info(f"Starting on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
