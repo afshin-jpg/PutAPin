@@ -7,6 +7,8 @@ import sheets
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+PORT = int(os.environ.get("PORT", 8443))
 
 HELP = (
     "/newlist <name> — create a list and switch to it\n"
@@ -19,8 +21,7 @@ HELP = (
 
 
 async def _active(update: Update) -> str | None:
-    chat_id = update.effective_chat.id
-    name = sheets.get_active_list(chat_id)
+    name = sheets.get_active_list(update.effective_chat.id)
     if not name:
         await update.message.reply_text("No active list. Use /switch <name> or /newlist <name>.")
     return name
@@ -105,7 +106,16 @@ def main():
     app.add_handler(CommandHandler("list", list_items))
     app.add_handler(CommandHandler("done", done))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_item))
-    app.run_polling()
+
+    if WEBHOOK_URL:
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=f"{WEBHOOK_URL}/webhook",
+            url_path="/webhook",
+        )
+    else:
+        app.run_polling()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 services:
-  - type: worker
-    name: list-bot
+  - type: web
+    name: putapin-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
@@ -10,4 +10,6 @@ services:
       - key: GOOGLE_CREDENTIALS
         sync: false
       - key: SPREADSHEET_ID
+        sync: false
+      - key: WEBHOOK_URL
         sync: false
