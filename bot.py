@@ -125,16 +125,19 @@ async def run_webhook(ptb_app):
     web_app.router.add_get("/", health)
     web_app.router.add_post("/webhook", webhook)
 
+    # Start HTTP server first so Render's health check passes immediately
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info(f"Listening on port {PORT}")
+
+    # Initialize PTB and register webhook after server is up
     async with ptb_app:
+        await ptb_app.initialize()
         await ptb_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
         await ptb_app.start()
-
-        runner = web.AppRunner(web_app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", PORT)
-        await site.start()
-        logging.info(f"Listening on port {PORT}")
-
+        logging.info("Webhook registered and bot started")
         await asyncio.Event().wait()
 
 
